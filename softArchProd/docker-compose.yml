@@ -1,0 +1,150 @@
+version: '3.3'
+
+services:
+  db-node-1:
+    build:
+      context: docker/mysql
+      dockerfile: Dockerfile
+    image: mariadb:hl
+    container_name: db-node-1
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: hl
+      MYSQL_USER: postgres
+      MYSQL_PASSWORD: postgres
+      MYSQL_ROOT_PASSWORD: '1'
+    command: >
+      --sql-mode='STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION'
+      --general-log=ON
+      --log-queries-not-using-indexes=ON
+    ports:
+      - 3360:3306
+    volumes:
+      - db-node-1-data:/var/lib/mysql
+
+  db-node-2:
+    build:
+      context: docker/mysql
+      dockerfile: Dockerfile
+    image: mariadb:hl
+    container_name: db-node-2
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: hl
+      MYSQL_USER: postgres
+      MYSQL_PASSWORD: postgres
+      MYSQL_ROOT_PASSWORD: '1'
+    command: >
+      --sql-mode='STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION'
+      --general-log=ON
+      --log-queries-not-using-indexes=ON
+    ports:
+      - 3361:3306
+    volumes:
+      - db-node-2-data:/var/lib/mysql
+
+  proxysql:
+    build:
+      context: docker/proxysql
+      dockerfile: Dockerfile
+    image: proxysql:hl
+    container_name: proxysql
+    depends_on:
+      - "db-node-1"
+      - "db-node-2"
+    # command: >
+    #   --initial
+    volumes:
+      - proxysql-data:/var/lib/proxysql
+    ports:
+      # Mysql Client Port
+      - "6033:6033"
+      # Mysql Admin Port
+      - "6032:6032"
+    healthcheck:
+      test: "/usr/bin/mysql -h 127.0.0.1 -P 6033 --user=postgres --password=postgres --execute \"SHOW DATABASES;\""
+      timeout: 20s
+      retries: 5
+
+  cache:
+    image: redis:6.2-alpine
+    restart: always
+    ports:
+      - 6379:6379
+    command: redis-server --save 20 1 --loglevel warning
+    volumes:
+      - cache:/data
+
+  zookeeper:
+    image: zookeeper
+    container_name: zookeeper
+    environment:
+        ZOOKEEPER_CLIENT_PORT: 2181
+        ZOOKEEPER_TICK_TIME: 2000
+        ZOOKEEPER_INIT_LIMIT: 5
+
+  kafka-node-1:
+    image: wurstmeister/kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - '2181:2181'
+      - '9092:9092'
+    container_name: kafka
+    environment:
+        KAFKA_BROKER_ID: 1
+        KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+        KAFKA_ADVERTISED_HOST_NAME: kafka-node-1
+        ADVERTISED_PORT: 9092
+        ADVERTISED_HOST_NAME: kafka-node-1
+        KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+        KAFKA_CREATE_TOPICS: "event_server:1:1"
+
+  user-service:
+    build:
+      context: .
+    image: uservice:hl
+    restart: unless-stopped
+    entrypoint: /app/build/user-service
+    container_name: user-service
+    environment:
+      - DB_HOST=proxysql
+      - DB_PORT=6033
+      - DB_LOGIN=postgres
+      - DB_PASSWORD=postgres
+      - DB_DATABASE=hl
+      - USE_CACHE=false
+      - CACHE_HOST=localhost
+      - CACHE_PORT=6379
+    ports:
+      - 8080:8080
+    depends_on:
+      proxysql:
+        condition: service_healthy
+
+  delivery-service:
+    build:
+      context: .
+    image: uservice:hl
+    restart: unless-stopped
+    entrypoint: /app/build/delivery-service
+    container_name: delivery-service
+    environment:
+      - DB_HOST=proxysql
+      - DB_PORT=6033
+      - DB_LOGIN=postgres
+      - DB_PASSWORD=postgres
+      - DB_DATABASE=hl
+      - SERVICE_HOST=user-service
+      - USE_CACHE=false
+      - CACHE_HOST=localhost
+      - CACHE_PORT=6379
+    ports:
+      - 8081:8081
+    depends_on:
+      - user-service
+volumes:
+  db-node-1-data:
+  db-node-2-data:
+  proxysql-data:
+  cache:
